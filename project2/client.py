@@ -66,6 +66,9 @@ class Agent:
                 print(f"DEBUG: Got {msg['type']} from {sender_ip}, my role={'manager' if self.is_manager else 'worker'}")
                 
                 if msg['type'] == 'heartbeat' and msg.get('token') == self.token:
+                    if not self.token:  # Deny if we don't have a valid token
+                        print("DEBUG: Ignoring heartbeat - no valid token")
+                        continue
                     sender_ip = self.normalize_ip(sender_ip)
                     if self.is_manager:
                         # Manager handling worker heartbeat
@@ -107,9 +110,16 @@ class Agent:
 
                 elif msg['type'] == 'who_is_manager':
                     if self.is_manager:
-                        response = {'type': 'i_am_manager', 'token': self.token}
-                        sock.sendto(json.dumps(response).encode(), addr)
-                        print("DEBUG: Sent manager response")
+                        # Only respond if requester has correct token or no token
+                        requester_token = msg.get('token')
+                        if requester_token == self.token or not requester_token:
+                            response = {
+                                'type': 'i_am_manager',
+                                'token': self.token,
+                                'valid': requester_token == self.token
+                            }
+                            sock.sendto(json.dumps(response).encode(), addr)
+                            print(f"DEBUG: Sent manager response, token valid: {requester_token == self.token}")
 
             except Exception as e:
                 print(f"DEBUG: Error in listener: {e}")
@@ -295,18 +305,24 @@ while True:
         sock.settimeout(3)
         
         msg = {'type': 'who_is_manager'}
+        if self.token:  # Include token if we have one
+            msg['token'] = self.token
+            
         sock.sendto(json.dumps(msg).encode(), ('<broadcast>', BROADCAST_PORT))
         
         try:
             data, addr = sock.recvfrom(1024)
             msg = json.loads(data.decode())
-            if msg['type'] == 'i_am_manager' and 'token' in msg:
+            if msg['type'] == 'i_am_manager':
                 print(f"DEBUG: Found manager at {addr[0]}")
-                self.token = msg['token']  # Set token from manager response
-                return addr[0]
+                # Only return manager if token is valid
+                if msg.get('valid', False):
+                    return addr[0]
+                else:
+                    print("ERROR: Invalid token for this cluster")
+                    return None
         except socket.timeout:
             print("DEBUG: No manager response received")
-            return None
         finally:
             sock.close()
         return None
@@ -322,21 +338,28 @@ def main():
     args = parser.parse_args()
 
     agent = Agent()
-    agent.is_manager = False  # Default to worker role
+    agent.is_manager = False
 
     if args.bootstrap:
         agent.bootstrap()
-    elif args.join and args.token:
-        agent.join(args.join, args.token)
-    else:
+    elif args.token:  # Handle token-only case
+        print("DEBUG: Looking for manager with provided token...")
+        agent.token = args.token  # Set token before looking for manager
         manager_ip = agent.get_manager()
         if manager_ip:
             print(f"Found manager at {manager_ip}")
-            # Join as worker when manager found
-            agent.join(manager_ip, agent.token)
+            agent.join(manager_ip, args.token)
         else:
-            print("No manager found. Becoming manager...")
-            agent.bootstrap()
+            print("ERROR: No manager found to join with token")
+            sys.exit(1)
+    elif args.join:
+        if not args.token:
+            print("ERROR: Must provide token to join cluster")
+            sys.exit(1)
+        agent.join(args.join, args.token)
+    else:
+        print("ERROR: Must provide either --bootstrap to create cluster or --token to join")
+        sys.exit(1)
 
     try:
         print("Agent running. Press Ctrl+C to exit.")
