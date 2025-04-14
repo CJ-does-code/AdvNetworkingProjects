@@ -92,6 +92,8 @@ class Agent:
                             else:
                                 print(f"DEBUG: IPs in list: {[type(ip) for ip in self.workers_join_order]}")
                                 print(f"DEBUG: My IP type: {type(self.my_ip)}")
+                    else:
+                        self.last_seen[sender_ip] = time.time()
                 
                 elif msg['type'] == 'new_manager' and msg.get('token') == self.token:
                     if not self.is_manager:  # Only process if we're a worker
@@ -178,22 +180,34 @@ class Agent:
             else:  # Worker checking manager
                 time_since_manager = current_time - self.last_manager_seen
                 if time_since_manager > MANAGER_TIMEOUT:
-                    if len(self.workers_join_order) > 0:  # Make sure list isn't empty
+                    if len(self.workers_join_order) > 0:
+                        # Check if nodes ahead of us are also dead
                         if self.my_ip in self.workers_join_order:
                             my_position = self.workers_join_order.index(self.my_ip)
-                            print(f"DEBUG: Manager dead, I am position {my_position} in line")
-                            if my_position == 0:  # We're next in line
-                                print(f"Taking over as manager after {time_since_manager:.1f}s timeout")
+                            print(f"DEBUG: Manager dead, checking succession. My position: {my_position}")
+                            
+                            # Look for any active nodes ahead of us
+                            found_active_predecessor = False
+                            for i in range(my_position):
+                                predecessor = self.workers_join_order[i]
+                                # If we haven't heard from this node recently, assume it's dead
+                                if predecessor in self.last_seen:
+                                    if current_time - self.last_seen[predecessor] <= MANAGER_TIMEOUT:
+                                        found_active_predecessor = True
+                                        print(f"DEBUG: Node {predecessor} is still active, waiting")
+                                        break
+                            
+                            # If no active nodes found before us in line, become manager
+                            if not found_active_predecessor:
+                                print(f"DEBUG: No active nodes ahead in line, becoming manager")
                                 self.is_manager = True
                                 self.manager_ip = None
-                                self.workers_join_order = self.workers_join_order[1:]  # Remove ourselves
+                                # Remove all nodes up to our position
+                                self.workers_join_order = self.workers_join_order[my_position + 1:]
                                 self.workers = set(self.workers_join_order)
-                                # Announce takeover to other nodes
                                 self.announce_manager_takeover()
                                 print(f"DEBUG: I am now manager. Workers: {self.workers_join_order}")
-                                return  # Exit check_dead_nodes and restart as manager
-                            else:
-                                print(f"DEBUG: Not first in line, waiting for {self.workers_join_order[0]}")
+                                return
             
             time.sleep(1)
 
