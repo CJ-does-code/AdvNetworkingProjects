@@ -25,6 +25,8 @@ class Agent:
         self.workers_join_order = []  # List of workers in join order
         self.last_manager_seen = 0    # Last time manager was seen
         self.manager_down_count = 0   # Counter for manager down checks
+        self.tasks = {}  # {worker_ip: task_name}
+        self.task_list = []  # List of all tasks to maintain order
         
         # Get real network IP, not localhost
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -95,6 +97,9 @@ class Agent:
                             else:
                                 print(f"DEBUG: IPs in list: {[type(ip) for ip in self.workers_join_order]}")
                                 print(f"DEBUG: My IP type: {type(self.my_ip)}")
+                        if 'tasks' in msg:
+                            self.tasks = msg['tasks']
+                            self.task_list = msg['task_list']
                     else:
                         self.last_seen[sender_ip] = time.time()
                 
@@ -154,6 +159,8 @@ class Agent:
             
             if self.is_manager:
                 msg['workers_list'] = self.workers_join_order
+                msg['tasks'] = self.tasks  # Include task assignments
+                msg['task_list'] = self.task_list
             
             try:
                 sock.sendto(json.dumps(msg).encode(), ('<broadcast>', BROADCAST_PORT))
@@ -179,6 +186,14 @@ class Agent:
                             dead_workers.append(worker_ip)
                             if worker_ip in self.services:
                                 self.migrate_service(worker_ip)
+                            if worker_ip in self.tasks:
+                                # Reassign task to another worker
+                                task = self.tasks[worker_ip]
+                                available_workers = list(self.workers - {worker_ip})
+                                if available_workers:
+                                    new_worker = random.choice(available_workers)
+                                    self.deploy_service(new_worker, task)
+                                del self.tasks[worker_ip]
                 
                 for worker in dead_workers:
                     print(f"Removing dead worker: {worker}")
@@ -232,28 +247,35 @@ class Agent:
                 self.services[new_worker] = service_path
                 del self.services[dead_worker]
 
-    def deploy_service(self, path, worker_ip=None):
-        if not worker_ip:
-            worker_ip = random.choice(list(self.workers))
-        
-        # Simple service that continuously prints "I'm alive!"
-        service_code = '''
-import time
-while True:
-    print("I'm alive!")
-    time.sleep(1)
-'''
-        
-        # Create a temporary file for the service
-        temp_path = f'/tmp/service_{int(time.time())}.py'
-        with open(temp_path, 'w') as f:
-            f.write(service_code)
-        
-        # Execute the service using subprocess
-        subprocess.Popen(['python3', temp_path])
-        
-        self.services[worker_ip] = temp_path
-        print(f"Deployed service on {worker_ip}")
+    def deploy_service(self, worker_ip, task_name):
+        if not self.is_manager:
+            print("Only manager can deploy services")
+            return
+            
+        if worker_ip not in self.workers:
+            print(f"Error: Worker {worker_ip} not found")
+            return
+            
+        self.tasks[worker_ip] = task_name
+        if task_name not in self.task_list:
+            self.task_list.append(task_name)
+        print(f"Assigned task {task_name} to worker {worker_ip}")
+
+    def keyboard_input_handler(self):
+        if not self.is_manager:
+            return
+            
+        while True:
+            try:
+                user_input = input()
+                if user_input.strip():
+                    try:
+                        worker_ip, task = user_input.strip().split()
+                        self.deploy_service(worker_ip, task)
+                    except ValueError:
+                        print("Invalid input format. Use: <worker_ip> <task_name>")
+            except Exception as e:
+                print(f"Error processing input: {e}")
 
     def bootstrap(self):
         self.is_manager = True
@@ -263,6 +285,7 @@ while True:
         threading.Thread(target=self.broadcast_listener, daemon=True).start()
         threading.Thread(target=self.heartbeat_sender, daemon=True).start()
         threading.Thread(target=self.check_dead_nodes, daemon=True).start()
+        threading.Thread(target=self.keyboard_input_handler, daemon=True).start()  # Add keyboard input thread
         
         self.announce_manager_takeover()  # Announce when becoming initial manager
         
